@@ -28,9 +28,32 @@
 
 #include "avcodec.h"
 
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
+
+#if CONFIG_DXVA2
+#include "dxva2.h"
+#else
+typedef void* IDirectXVideoProcessorService;
+typedef void* IDirectXVideoProcessor;
+typedef void* IDirect3DDevice9;
+typedef void* IDirect3DSurface9;
+
+typedef struct _DXVA2_ValueRange
+{
+} DXVA2_ValueRange;
+#endif
+
 #if CONFIG_CUDA
 #include "libavutil/hwcontext_cuda.h"
 #else
+
+typedef struct AVCUDADeviceContext
+{
+    void* cuda_ctx;
+    void* directx_device;
+} AVCUDADeviceContext;
 
 #if defined(_WIN32)
 #define CUDAAPI __stdcall
@@ -72,6 +95,7 @@ typedef CUresult(CUDAAPI *PCUDEVICECOMPUTECAPABILITY)(int *major, int *minor, CU
 typedef CUresult(CUDAAPI *PCUCTXCREATE)(CUcontext *pctx, unsigned int flags, CUdevice dev);
 typedef CUresult(CUDAAPI *PCUCTXPOPCURRENT)(CUcontext *pctx);
 typedef CUresult(CUDAAPI *PCUCTXDESTROY)(CUcontext ctx);
+typedef HRESULT(__stdcall *DXVA2CREATEVIDEOSERVICE)(IDirect3DDevice9*, REFIID, void**);
 
 typedef NVENCSTATUS (NVENCAPI *PNVENCODEAPIGETMAXSUPPORTEDVERSION)(uint32_t* version);
 typedef NVENCSTATUS (NVENCAPI *PNVENCODEAPICREATEINSTANCE)(NV_ENCODE_API_FUNCTION_LIST *functionList);
@@ -82,6 +106,7 @@ typedef struct NvencDynLoadFunctions
     void *cuda;
 #endif
     void *nvenc;
+    void *dxva;
 
     PCUINIT cu_init;
     PCUDEVICEGETCOUNT cu_device_get_count;
@@ -91,6 +116,7 @@ typedef struct NvencDynLoadFunctions
     PCUCTXCREATE cu_ctx_create;
     PCUCTXPOPCURRENT cu_ctx_pop_current;
     PCUCTXDESTROY cu_ctx_destroy;
+    DXVA2CREATEVIDEOSERVICE dxva2CreateVideoService;
 
     NV_ENCODE_API_FUNCTION_LIST nvenc_funcs;
     int nvenc_device_count;
@@ -145,6 +171,15 @@ typedef struct NvencContext
     NV_ENC_CONFIG encode_config;
     CUcontext cu_context;
     CUcontext cu_context_internal;
+    IDirect3DDevice9* directx_device;
+    IDirect3DSurface9* nv12_scratch_surface[MAX_REGISTERED_FRAMES];
+    int nv12_scratch_utilization[MAX_REGISTERED_FRAMES];
+    IDirectXVideoProcessorService* dxva_svc;
+    IDirectXVideoProcessor* dxva_processor;
+    DXVA2_ValueRange dxva_brightness;
+    DXVA2_ValueRange dxva_contrast;
+    DXVA2_ValueRange dxva_hue;
+    DXVA2_ValueRange dxva_saturation;
 
     int nb_surfaces;
     NvencSurface *surfaces;

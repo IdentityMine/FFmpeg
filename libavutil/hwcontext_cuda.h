@@ -36,7 +36,21 @@
  * This struct is allocated as AVHWDeviceContext.hwctx
  */
 typedef struct AVCUDADeviceContext {
+	/**
+	 * The CUDA device context, or NULL if directx_device is set.
+	 */
     CUcontext cuda_ctx;
+
+    /**
+	 * An IUnknown pointer to a DirectX 9, 10, or 11 device,
+	 * if the input frames are expected to be DirectX textures.
+	 * Should be NULL if input frames are expected to be CUDA resources.
+	 *
+	 * This field is ignored on non-Windows platforms.
+	 *
+	 * TODO: Comment on reference counting strategy
+	 */
+	void* directx_device;
 } AVCUDADeviceContext;
 
 /**

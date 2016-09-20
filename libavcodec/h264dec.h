@@ -445,6 +445,11 @@ typedef struct H264Context {
 
     int nal_ref_idc;
     int nal_unit_type;
+    int nal_mvc_priority_id;
+    int nal_mvc_view_id;
+    int nal_mvc_temporal_id;
+    int nal_mvc_anchor_pic_flag;
+    int nal_mvc_inter_view_flag;
 
     /**
      * Used to parse AVC variant of H.264

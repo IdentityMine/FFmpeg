@@ -310,5 +310,5 @@ const HWContextType ff_hwcontext_type_cuda = {
     .transfer_data_to     = cuda_transfer_data_to,
     .transfer_data_from   = cuda_transfer_data_from,
 
-    .pix_fmts             = (const enum AVPixelFormat[]){ AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE },
+    .pix_fmts             = (const enum AVPixelFormat[]){ AV_PIX_FMT_CUDA, AV_PIX_FMT_DXVA2_VLD, AV_PIX_FMT_NONE, AV_PIX_FMT_ARGB },
 };

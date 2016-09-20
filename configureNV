@@ -1,0 +1,1 @@
+configure --toolchain=msvc --enable-shared --enable-muxer=mp4 --enable-nvenc --enable-dxva2 --disable-d3d11va --enable-cuda --enable-nonfree

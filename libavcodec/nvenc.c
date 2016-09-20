@@ -23,6 +23,7 @@
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 # define CUDA_LIBNAME "nvcuda.dll"
+# define DXVA_LIBNAME "dxva2.dll"
 # if ARCH_X86_64
 #  define NVENC_LIBNAME "nvEncodeAPI64.dll"
 # else
@@ -34,7 +35,12 @@
 #endif
 
 #if defined(_WIN32)
+#include <initguid.h>
 #include <windows.h>
+#include <d3d11.h>
+#include <d3d10.h>
+#include <d3d9.h>
+//#include <dxva.h>
 
 #define dlopen(filename, flags) LoadLibrary(TEXT(filename))
 #define dlsym(handle, symbol)   GetProcAddress(handle, symbol)
@@ -49,6 +55,12 @@
 #include "libavutil/mem.h"
 #include "internal.h"
 #include "nvenc.h"
+
+const D3DFORMAT D3DFMT_NV12 = (D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2');
+//
+//const GUID FAR IID_IDirect3DDevice9;
+//const GUID FAR IID_IDirectXVideoProcessorService;
+//const GUID FAR DXVA2_VideoProcProgressiveDevice;
 
 #define NVENC_CAP 0x30
 #define IS_CBR(rc) (rc == NV_ENC_PARAMS_RC_CBR ||               \
@@ -86,6 +98,7 @@ const enum AVPixelFormat ff_nvenc_pix_fmts[] = {
 #if CONFIG_CUDA
     AV_PIX_FMT_CUDA,
 #endif
+    AV_PIX_FMT_DXVA2_VLD,
     AV_PIX_FMT_NONE
 };
 
@@ -186,11 +199,14 @@ static av_cold int nvenc_load_libraries(AVCodecContext *avctx)
 #endif
 
     LOAD_LIBRARY(dl_fn->nvenc, NVENC_LIBNAME);
+    LOAD_LIBRARY(dl_fn->dxva, DXVA_LIBNAME);
 
     LOAD_SYMBOL(nvenc_get_max_ver, dl_fn->nvenc,
                 "NvEncodeAPIGetMaxSupportedVersion");
     LOAD_SYMBOL(nvenc_create_instance, dl_fn->nvenc,
                 "NvEncodeAPICreateInstance");
+    LOAD_SYMBOL(dl_fn->dxva2CreateVideoService, dl_fn->dxva,
+                "DXVA2CreateVideoService");
 
     err = nvenc_get_max_ver(&nvenc_max_ver);
     if (err != NV_ENC_SUCCESS)
@@ -226,8 +242,21 @@ static av_cold int nvenc_open_session(AVCodecContext *avctx)
 
     params.version    = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
     params.apiVersion = NVENCAPI_VERSION;
-    params.device     = ctx->cu_context;
-    params.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+
+#if defined(_WIN32)
+    if (!ctx->directx_device)
+#endif
+    {
+        params.device = ctx->cu_context;
+        params.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+    }
+#if defined(_WIN32)
+    else
+    {
+        params.device = ctx->directx_device;
+        params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+    }
+#endif
 
     ret = p_nvenc->nvEncOpenEncodeSessionEx(&params, &ctx->nvencoder);
     if (ret != NV_ENC_SUCCESS) {
@@ -451,8 +480,13 @@ static av_cold int nvenc_setup_device(AVCodecContext *avctx)
         return AVERROR_BUG;
     }
 
-    if (avctx->pix_fmt == AV_PIX_FMT_CUDA) {
-#if CONFIG_CUDA
+#if !CONFIG_CUDA
+    if (avctx->pix_fmt == AV_PIX_FMT_CUDA)
+        return AVERROR_BUG;
+#endif
+    
+    if (avctx->pix_fmt == AV_PIX_FMT_CUDA || avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) 
+    { 
         AVHWFramesContext   *frames_ctx;
         AVCUDADeviceContext *device_hwctx;
         int ret;
@@ -464,6 +498,48 @@ static av_cold int nvenc_setup_device(AVCodecContext *avctx)
         device_hwctx = frames_ctx->device_ctx->hwctx;
 
         ctx->cu_context = device_hwctx->cuda_ctx;
+        ctx->directx_device = NULL;
+        ctx->dxva_svc = NULL;
+        ctx->dxva_processor = NULL;
+
+#if CONFIG_DXVA2
+        if (avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD)
+        {
+            HRESULT hr;
+            DXVA2_VideoDesc vd;
+
+            if (!device_hwctx->directx_device)
+                return AVERROR(EINVAL);
+
+            hr = IDirect3DDevice9_QueryInterface((IDirect3DDevice9*)device_hwctx->directx_device, &IID_IDirect3DDevice9, (void**)&ctx->directx_device);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = dl_fn->dxva2CreateVideoService(ctx->directx_device, &IID_IDirectXVideoProcessorService, (void**)&ctx->dxva_svc);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = IDirectXVideoProcessorService_CreateVideoProcessor(ctx->dxva_svc, &DXVA2_VideoProcProgressiveDevice, &vd, D3DFMT_NV12, 0, &ctx->dxva_processor);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = IDirectXVideoProcessorService_GetProcAmpRange(ctx->dxva_svc, &DXVA2_VideoProcProgressiveDevice, &vd, D3DFMT_NV12, DXVA2_ProcAmp_Brightness, &ctx->dxva_brightness);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = IDirectXVideoProcessorService_GetProcAmpRange(ctx->dxva_svc, &DXVA2_VideoProcProgressiveDevice, &vd, D3DFMT_NV12, DXVA2_ProcAmp_Contrast, &ctx->dxva_contrast);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = IDirectXVideoProcessorService_GetProcAmpRange(ctx->dxva_svc, &DXVA2_VideoProcProgressiveDevice, &vd, D3DFMT_NV12, DXVA2_ProcAmp_Hue, &ctx->dxva_hue);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+
+            hr = IDirectXVideoProcessorService_GetProcAmpRange(ctx->dxva_svc, &DXVA2_VideoProcProgressiveDevice, &vd, D3DFMT_NV12, DXVA2_ProcAmp_Saturation, &ctx->dxva_saturation);
+            if (hr != S_OK)
+                return AVERROR(ENOSYS);
+    }
+#endif
 
         ret = nvenc_open_session(avctx);
         if (ret < 0)
@@ -474,9 +550,6 @@ static av_cold int nvenc_setup_device(AVCodecContext *avctx)
             av_log(avctx, AV_LOG_FATAL, "Provided device doesn't support required NVENC features\n");
             return ret;
         }
-#else
-        return AVERROR_BUG;
-#endif
     } else {
         int i, nb_devices = 0;
 
@@ -1042,6 +1115,10 @@ static av_cold int nvenc_alloc_surface(AVCodecContext *avctx, int idx)
         ctx->surfaces[idx].format = NV_ENC_BUFFER_FORMAT_ABGR;
         break;
 
+    case AV_PIX_FMT_ARGB:
+        ctx->surfaces[idx].format = NV_ENC_BUFFER_FORMAT_ARGB;
+        break;
+
     default:
         av_log(avctx, AV_LOG_FATAL, "Invalid input pixel format\n");
         return AVERROR(EINVAL);
@@ -1051,6 +1128,11 @@ static av_cold int nvenc_alloc_surface(AVCodecContext *avctx, int idx)
         ctx->surfaces[idx].in_ref = av_frame_alloc();
         if (!ctx->surfaces[idx].in_ref)
             return AVERROR(ENOMEM);
+    } else if (avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) {
+        ctx->surfaces[idx].in_ref = NULL;
+        //ctx->surfaces[idx].in_ref = av_frame_alloc();
+        //if (!ctx->surfaces[idx].in_ref)
+        //  return AVERROR(ENOMEM);
     } else {
         NV_ENC_CREATE_INPUT_BUFFER allocSurf = { 0 };
         allocSurf.version = NV_ENC_CREATE_INPUT_BUFFER_VER;
@@ -1080,7 +1162,7 @@ static av_cold int nvenc_alloc_surface(AVCodecContext *avctx, int idx)
     nv_status = p_nvenc->nvEncCreateBitstreamBuffer(ctx->nvencoder, &allocOut);
     if (nv_status != NV_ENC_SUCCESS) {
         int err = nvenc_print_error(avctx, nv_status, "CreateBitstreamBuffer failed");
-        if (avctx->pix_fmt != AV_PIX_FMT_CUDA)
+        if (avctx->pix_fmt != AV_PIX_FMT_CUDA && avctx->pix_fmt != AV_PIX_FMT_DXVA2_VLD)
             p_nvenc->nvEncDestroyInputBuffer(ctx->nvencoder, ctx->surfaces[idx].input_surface);
         av_frame_free(&ctx->surfaces[idx].in_ref);
         return err;
@@ -1101,6 +1183,13 @@ static av_cold int nvenc_setup_surfaces(AVCodecContext *avctx)
                              ctx->nb_surfaces);
     ctx->async_depth = FFMIN(ctx->async_depth, ctx->nb_surfaces - 1);
 
+    if (avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD)
+    {
+        HRESULT hr = IDirectXVideoProcessorService_CreateSurface(ctx->dxva_svc, avctx->width, avctx->height, MAX_REGISTERED_FRAMES,
+            D3DFMT_NV12, D3DPOOL_DEFAULT, 0, DXVA2_VideoProcessorRenderTarget, ctx->nv12_scratch_surface, NULL);
+        if (hr != S_OK)
+            return AVERROR(hr);
+    }
 
     ctx->surfaces = av_mallocz_array(ctx->nb_surfaces, sizeof(*ctx->surfaces));
     if (!ctx->surfaces)
@@ -1176,7 +1265,7 @@ av_cold int ff_nvenc_encode_close(AVCodecContext *avctx)
     av_fifo_freep(&ctx->output_surface_ready_queue);
     av_fifo_freep(&ctx->output_surface_queue);
 
-    if (ctx->surfaces && avctx->pix_fmt == AV_PIX_FMT_CUDA) {
+    if (ctx->surfaces && (avctx->pix_fmt == AV_PIX_FMT_CUDA)) {
         for (i = 0; i < ctx->nb_surfaces; ++i) {
             if (ctx->surfaces[i].input_surface) {
                  p_nvenc->nvEncUnmapInputResource(ctx->nvencoder, ctx->surfaces[i].in_map.mappedResource);
@@ -1191,7 +1280,7 @@ av_cold int ff_nvenc_encode_close(AVCodecContext *avctx)
 
     if (ctx->surfaces) {
         for (i = 0; i < ctx->nb_surfaces; ++i) {
-            if (avctx->pix_fmt != AV_PIX_FMT_CUDA)
+            if (avctx->pix_fmt != AV_PIX_FMT_CUDA && avctx->pix_fmt != AV_PIX_FMT_DXVA2_VLD)
                 p_nvenc->nvEncDestroyInputBuffer(ctx->nvencoder, ctx->surfaces[i].input_surface);
             av_frame_free(&ctx->surfaces[i].in_ref);
             p_nvenc->nvEncDestroyBitstreamBuffer(ctx->nvencoder, ctx->surfaces[i].output_surface);
@@ -1239,7 +1328,7 @@ av_cold int ff_nvenc_encode_init(AVCodecContext *avctx)
     NvencContext *ctx = avctx->priv_data;
     int ret;
 
-    if (avctx->pix_fmt == AV_PIX_FMT_CUDA) {
+    if (avctx->pix_fmt == AV_PIX_FMT_CUDA || avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) {
         AVHWFramesContext *frames_ctx;
         if (!avctx->hw_frames_ctx) {
             av_log(avctx, AV_LOG_ERROR,
@@ -1343,6 +1432,51 @@ static int nvenc_find_free_reg_resource(AVCodecContext *avctx)
     return AVERROR(ENOMEM);
 }
 
+static int nvenc_convert_rgb_to_nv12(AVCodecContext *avctx, IDirect3DSurface9 *pSrcRGB, IDirect3DSurface9 *pNV12Dst)
+{
+    NvencContext *ctx = avctx->priv_data;
+
+#if defined(_WIN32)
+    DXVA2_VideoProcessBltParams vpblt;
+    DXVA2_VideoSample vs;
+
+    RECT srcRect = { 0, 0, avctx->width, avctx->height };
+    RECT dstRect = { 0, 0, avctx->width, avctx->height };
+
+    // Input
+    memset(&vs, 0, sizeof(vs));
+    vs.PlanarAlpha.ll = 0x10000;
+    vs.SrcSurface = pSrcRGB;
+    vs.SrcRect = srcRect;
+    vs.DstRect = dstRect;
+    vs.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+    vs.SampleFormat.VideoChromaSubsampling = DXVA2_VideoChromaSubsampling_MPEG2;
+    vs.SampleFormat.NominalRange = DXVA2_NominalRange_0_255;
+    vs.SampleFormat.VideoTransferMatrix = DXVA2_VideoTransferMatrix_BT601;
+
+    // Output
+    memset(&vpblt, 0, sizeof(vpblt));
+    vpblt.TargetRect = dstRect;
+    vpblt.DestFormat = vs.SampleFormat;
+    vpblt.DestFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+    vpblt.Alpha.ll = 0x10000;
+    vpblt.TargetFrame = vs.Start;
+    vpblt.ProcAmpValues.Brightness = ctx->dxva_brightness.DefaultValue;
+    vpblt.ProcAmpValues.Contrast = ctx->dxva_contrast.DefaultValue;
+    vpblt.ProcAmpValues.Hue = ctx->dxva_hue.DefaultValue;
+    vpblt.ProcAmpValues.Saturation = ctx->dxva_saturation.DefaultValue;
+    vpblt.BackgroundColor.Y = 0x1000;
+    vpblt.BackgroundColor.Cb = 0x8000;
+    vpblt.BackgroundColor.Cr = 0x8000;
+    vpblt.BackgroundColor.Alpha = 0xffff;
+    HRESULT hr = IDirectXVideoProcessor_VideoProcessBlt(ctx->dxva_processor, pNV12Dst, &vpblt, &vs, 1, NULL);
+
+    return hr;
+#else
+    return AVERROR_BUG;
+#endif
+}
+
 static int nvenc_register_frame(AVCodecContext *avctx, const AVFrame *frame)
 {
     NvencContext *ctx = avctx->priv_data;
@@ -1354,7 +1488,7 @@ static int nvenc_register_frame(AVCodecContext *avctx, const AVFrame *frame)
     int i, idx, ret;
 
     for (i = 0; i < ctx->nb_registered_frames; i++) {
-        if (ctx->registered_frames[i].ptr == (CUdeviceptr)frame->data[0])
+        if (ctx->registered_frames[i].ptr == frame->data[0])
             return i;
     }
 
@@ -1362,22 +1496,88 @@ static int nvenc_register_frame(AVCodecContext *avctx, const AVFrame *frame)
     if (idx < 0)
         return idx;
 
-    reg.version            = NV_ENC_REGISTER_RESOURCE_VER;
-    reg.resourceType       = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
-    reg.width              = frames_ctx->width;
-    reg.height             = frames_ctx->height;
-    reg.bufferFormat       = ctx->surfaces[0].format;
-    reg.pitch              = frame->linesize[0];
-    reg.resourceToRegister = frame->data[0];
+    if (avctx->pix_fmt == AV_PIX_FMT_CUDA) {
+        reg.version = NV_ENC_REGISTER_RESOURCE_VER;
+        reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
+        reg.width = frames_ctx->width;
+        reg.height = frames_ctx->height;
+        reg.bufferFormat = ctx->surfaces[0].format;
+        reg.pitch = frame->linesize[0];
+        reg.resourceToRegister = frame->data[0];
 
-    ret = p_nvenc->nvEncRegisterResource(ctx->nvencoder, &reg);
-    if (ret != NV_ENC_SUCCESS) {
-        nvenc_print_error(avctx, ret, "Error registering an input resource");
+        ret = p_nvenc->nvEncRegisterResource(ctx->nvencoder, &reg);
+        if (ret != NV_ENC_SUCCESS) {
+            nvenc_print_error(avctx, ret, "Error registering an input resource");
+            return AVERROR_UNKNOWN;
+        }
+
+        ctx->registered_frames[idx].ptr = (CUdeviceptr)frame->data[0];
+        ctx->registered_frames[idx].regptr = reg.registeredResource;
+    }
+    else if (avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) {
+
+#if !CONFIG_DXVA2
+        nvenc_print_error(avctx, AVERROR(EINVAL), "D3D11VA not enabled; cannot accept DXVA input frames.");
+        return AVERROR(EINVAL);
+#else 
+        if (!frame->data[3])
+        {
+            nvenc_print_error(avctx, AVERROR(EINVAL), "No HW frame data provided");
+            return AVERROR(EINVAL);
+        }
+
+        IDirect3DSurface9* surface = NULL;
+        IDirect3DSurface9* nv12Surface = NULL;
+
+        if (S_OK != IDirect3DSurface9_QueryInterface((IDirect3DSurface9*)frame->data[3], &IID_IDirect3DSurface9, (void**)&surface))
+        {
+            nvenc_print_error(avctx, AVERROR(EINVAL), "Frame data is not IDirect3DSurface9");
+            return AVERROR(EINVAL);
+        }
+
+        D3DSURFACE_DESC surfaceDesc;
+        IDirect3DSurface9_GetDesc(surface, &surfaceDesc);
+
+        if (surfaceDesc.Format == D3DFMT_A8R8G8B8 || surfaceDesc.Format == D3DFMT_X8R8G8B8)
+        {
+            nv12Surface = ctx->nv12_scratch_surface[idx];
+            nvenc_convert_rgb_to_nv12(avctx, surface, nv12Surface);
+        }
+        else if (surfaceDesc.Format == D3DFMT_NV12)
+            nv12Surface = surface;
+        else
+        {
+            nvenc_print_error(avctx, AVERROR(EINVAL), "Frame surface is an unsupported format (only D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, and D3DFMT_NV12 are supported)");
+            return AVERROR(EINVAL);
+        }
+
+        reg.version = NV_ENC_REGISTER_RESOURCE_VER;
+        reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+        reg.width = frames_ctx->width;
+        reg.height = frames_ctx->height;
+        reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12_PL;
+        reg.pitch = 0;
+        reg.resourceToRegister = nv12Surface;
+
+        ret = p_nvenc->nvEncRegisterResource(ctx->nvencoder, &reg);
+        if (ret != NV_ENC_SUCCESS) {
+            nvenc_print_error(avctx, ret, "Error registering an input resource");
+            return AVERROR_UNKNOWN;
+        }
+
+        ctx->registered_frames[idx].ptr = (CUdeviceptr)frame->data[3];
+        ctx->registered_frames[idx].regptr = reg.registeredResource;
+#endif
+    }
+    else if (avctx->pix_fmt == AV_PIX_FMT_D3D11VA_VLD) {
+        nvenc_print_error(avctx, AVERROR(EINVAL), "D3D11VA input is not yet implemented");
+        return AVERROR(EINVAL);
+    }
+    else {
+        nvenc_print_error(avctx, ret, "Bad pix_fmt in AVCodecContext.");
         return AVERROR_UNKNOWN;
     }
 
-    ctx->registered_frames[idx].ptr    = (CUdeviceptr)frame->data[0];
-    ctx->registered_frames[idx].regptr = reg.registeredResource;
     return idx;
 }
 
@@ -1414,6 +1614,24 @@ static int nvenc_upload_frame(AVCodecContext *avctx, const AVFrame *frame,
         nvenc_frame->reg_idx                   = reg_idx;
         nvenc_frame->input_surface             = nvenc_frame->in_map.mappedResource;
         nvenc_frame->pitch                     = frame->linesize[0];
+        return 0;
+    } else if (avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) {
+        int reg_idx = nvenc_register_frame(avctx, frame);
+        if (reg_idx < 0) {
+            av_log(avctx, AV_LOG_ERROR, "Could not register an input CUDA frame\n");
+            return reg_idx;
+        }
+
+        nvenc_frame->in_map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+        nvenc_frame->in_map.registeredResource = ctx->registered_frames[reg_idx].regptr;
+        nv_status = p_nvenc->nvEncMapInputResource(ctx->nvencoder, &nvenc_frame->in_map);
+        if (nv_status != NV_ENC_SUCCESS) {
+            return nvenc_print_error(avctx, nv_status, "Error mapping an input resource");
+        }
+
+        ctx->registered_frames[reg_idx].mapped = 1;
+        nvenc_frame->reg_idx = reg_idx;
+        nvenc_frame->input_surface = nvenc_frame->in_map.mappedResource;
         return 0;
     } else {
         NV_ENC_LOCK_INPUT_BUFFER lockBufferParams = { 0 };
@@ -1562,9 +1780,12 @@ static int process_output_surface(AVCodecContext *avctx, AVPacket *pkt, NvencSur
         nvenc_print_error(avctx, nv_status, "Failed unlocking bitstream buffer, expect the gates of mordor to open");
 
 
-    if (avctx->pix_fmt == AV_PIX_FMT_CUDA) {
+    if (avctx->pix_fmt == AV_PIX_FMT_CUDA || avctx->pix_fmt == AV_PIX_FMT_DXVA2_VLD) {
         p_nvenc->nvEncUnmapInputResource(ctx->nvencoder, tmpoutsurf->in_map.mappedResource);
-        av_frame_unref(tmpoutsurf->in_ref);
+        
+        if (avctx->pix_fmt == AV_PIX_FMT_CUDA)
+            av_frame_unref(tmpoutsurf->in_ref);
+
         ctx->registered_frames[tmpoutsurf->reg_idx].mapped = 0;
 
         tmpoutsurf->input_surface = NULL;
@@ -1631,9 +1852,9 @@ static int output_ready(AVCodecContext *avctx, int flush)
 
     nb_ready   = av_fifo_size(ctx->output_surface_ready_queue)   / sizeof(NvencSurface*);
     nb_pending = av_fifo_size(ctx->output_surface_queue)         / sizeof(NvencSurface*);
-    if (flush)
+    //if (flush)
         return nb_ready > 0;
-    return (nb_ready > 0) && (nb_ready + nb_pending >= ctx->async_depth);
+    //return (nb_ready > 0) && (nb_ready + nb_pending >= ctx->async_depth);
 }
 
 int ff_nvenc_encode_frame(AVCodecContext *avctx, AVPacket *pkt,

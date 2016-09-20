@@ -1,0 +1,1 @@
+configure --toolchain=msvc --enable-shared --enable-nvenc --enable-cuda --enable-dxva2 --enable-nonfree --enable-libmfx --extra-cflags=-I./cuda --extra-ldflags=-LIBPATH:./cuda

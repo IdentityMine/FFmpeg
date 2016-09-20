@@ -884,6 +884,25 @@ FF_ENABLE_DEPRECATION_WARNINGS
                    nal->type, nal->size_bits);
         }
 
+        /*
+		if (nal->type == H264_NAL_SLICE_EXTENSION)
+		{
+			int svc_extension_flag = get_bits(&nal->gb, 1);
+			if (!svc_extension_flag)
+			{
+				// Slice Extension is MVC data!
+				int non_idr_flag = get_bits(&nal->gb, 1);
+				h->nal_mvc_priority_id = get_bits(&nal->gb, 6);
+				h->nal_mvc_view_id = get_bits(&nal->gb, 10);
+				h->nal_mvc_temporal_id = get_bits(&nal->gb, 3);
+				h->nal_mvc_anchor_pic_flag = get_bits(&nal->gb, 1);
+				h->nal_mvc_inter_view_flag = get_bits(&nal->gb, 1);
+				int reserved_one_bit = get_bits(&nal->gb, 1);
+
+				nal->type = (non_idr_flag ? H264_NAL_SLICE : H264_NAL_IDR_SLICE);
+			}
+		}*/
+
         if (context_count == h->max_contexts) {
             ret = ff_h264_execute_decode_slices(h, context_count);
             if (ret < 0 && (h->avctx->err_recognition & AV_EF_EXPLODE))

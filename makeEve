@@ -1,0 +1,4 @@
+make
+cp libavformat/*.dll /c/work/eve/apps/ffmpegServerTest/ffmpeg
+cp libavcodec/*.dll /c/work/eve/apps/ffmpegServerTest/ffmpeg
+cp libavutil/*.dll /c/work/eve/apps/ffmpegServerTest/ffmpeg

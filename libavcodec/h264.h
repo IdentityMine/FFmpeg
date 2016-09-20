@@ -42,6 +42,7 @@ enum {
     H264_NAL_FILLER_DATA     = 12,
     H264_NAL_SPS_EXT         = 13,
     H264_NAL_AUXILIARY_SLICE = 19,
+    H264_NAL_SLICE_EXTENSION = 20,
 };
 
 #endif /* AVCODEC_H264_H */
