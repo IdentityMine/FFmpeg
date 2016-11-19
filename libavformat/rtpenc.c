@@ -82,6 +82,7 @@ static int is_supported(enum AVCodecID id)
     case AV_CODEC_ID_MJPEG:
     case AV_CODEC_ID_SPEEX:
     case AV_CODEC_ID_OPUS:
+    case AV_CODEC_ID_BIN_DATA:
         return 1;
     default:
         return 0;
@@ -622,6 +623,7 @@ static int rtp_write_packet(AVFormatContext *s1, AVPacket *pkt)
             return AVERROR(EINVAL);
         }
         /* Intentional fallthrough */
+    case AV_CODEC_ID_BIN_DATA:
     default:
         /* better than nothing : send the codec raw data */
         rtp_send_raw(s1, pkt->data, size);
